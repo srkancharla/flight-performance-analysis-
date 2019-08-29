@@ -1,0 +1,95 @@
+# Databricks notebook source
+#Consolidate all monthly data
+
+transitData = sqlContext.sql("select * from dec2018 union all select * from nov2018 union all select * from oct2018")
+transitData.registerTempTable("TransitData")
+
+
+# Available IATA codes from the departuredelays sample dataset
+tripIATA = sqlContext.sql("select distinct iata from (select distinct origin as iata from transitData union all select distinct dest as iata from transitData) a")
+tripIATA.registerTempTable("tripIATA")
+
+
+
+# Only include airports with atleast one trip from the departureDelays dataset
+airports = sqlContext.sql("select f.id as IATA, f.City, f.State, f.Country from airport_codes f join tripIATA t on t.IATA = f.id")
+airports.registerTempTable("airports")
+airports.cache()
+
+
+# Build `departureDelays_geo` DataFrame
+#  Obtain key attributes such as Date of flight, delays, distance, and airport information (Origin, Destination)  
+departureDelays_geo = sqlContext.sql("select cast(f.FlightDate as int) as tripid, cast(concat(concat(concat(concat(concat(concat('2018-', concat(concat(substr(cast(f.FlightDate as string), 1, 2), '-')), substr(cast(f.FlightDate as string), 3, 2)), ' '), substr(cast(f.FlightDate as string), 5, 2)), ':'), substr(cast(f.FlightDate as string), 7, 2)), ':00') as timestamp) as `localdate`, cast(f.DepDelay as int) as delay, cast(f.Distance as int) as distance, f.origin as src, f.dest as dst, o.city as city_src, d.city as city_dst, o.state as state_src, d.state as state_dst from transitData f join airports o on o.iata = f.origin join airports d on d.iata = f.dest") 
+
+# RegisterTempTable
+departureDelays_geo.registerTempTable("departureDelays_geo")
+
+# Cache and Count
+departureDelays_geo.cache()
+departureDelays_geo.count()
+
+# Note, ensure you have already installed the GraphFrames spack-package
+from pyspark.sql.functions import *
+from graphframes import *
+
+# Create Vertices (airports) and Edges (flights)
+tripVertices = airports.withColumnRenamed("IATA", "id").distinct()
+tripEdges = departureDelays_geo.select("tripid", "delay", "src", "dst", "city_dst", "state_dst")
+
+# Cache Vertices and Edges
+tripEdges.cache()
+tripVertices.cache()
+
+# Vertices
+#   The vertices of our graph are the airports
+# display(tripVertices)
+
+
+# Edges
+#  The edges of our graph are the flights between airports
+# display(tripEdges)
+
+# Build `tripGraph` GraphFrame
+#  This GraphFrame builds up on the vertices and edges based on our trips (flights)
+tripGraph = GraphFrame(tripVertices, tripEdges)
+print(tripGraph)
+
+# Build `tripGraphPrime` GraphFrame
+#   This graphframe contains a smaller subset of data to make it easier to display motifs and subgraphs (below)
+tripEdgesPrime = departureDelays_geo.select("tripid", "delay", "src", "dst")
+tripGraphPrime = GraphFrame(tripVertices, tripEdgesPrime)
+
+
+print("Airports: %d" % tripGraph.vertices.count())
+print("Trips: %d" % tripGraph.edges.count())
+
+# Finding the longest Delay
+longestDelay = tripGraph.edges.groupBy().max("delay")
+display(longestDelay)
+
+
+# Determining number of on-time / early flights vs. delayed flights
+print("On-time / Early Flights: %d" % tripGraph.edges.filter("delay <= 0").count())
+print("Delayed Flights: %d" % tripGraph.edges.filter("delay > 0").count())
+
+
+tripGraph.edges\
+  .filter("src = 'MEM' and delay > 0")\
+  .groupBy("src", "dst")\
+  .avg("delay")\
+  .sort(desc("avg(delay)"))
+
+
+display(tripGraph.edges.filter("src = 'MEM' and delay > 0").groupBy("src", "dst").avg("delay").sort(desc("avg(delay)")))
+
+# After displaying tripDelays, use Plot Options to set `state_dst` as a Key.
+#tripDelays = tripGraph.edges.filter("delay > 0")
+#display(tripDelays)
+
+# States with the longest cumulative delays (with individual delays > 100 minutes) (origin: Seattle)
+#display(tripGraph.edges.filter("src = 'SEA' and delay > 100"))
+
+# Degrees
+#  The number of degrees - the number of incoming and outgoing connections - for various airports within this sample dataset
+#display(tripGraph.degrees.sort(desc("degree")).limit(20))
+
